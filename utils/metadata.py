@@ -1,4 +1,26 @@
 from dataclasses import dataclass
+from typing import TypedDict
+
+
+class MetadataDict(TypedDict):
+  id: str
+  org_text: str
+  clean_text: str
+  start_time: float
+  end_time: float
+  signer_id: int
+  signer: int
+  start: int
+  end: int
+  file: str
+  label: int
+  height: float
+  width: float
+  fps: float
+  url: str
+  text: str
+  box: list[float]
+  filename: str
 
 
 @dataclass
@@ -22,7 +44,7 @@ class Metadata:
   box: list[float]
   filename: str
 
-  def as_dict(self) -> dict:
+  def as_dict(self) -> MetadataDict:
     return {
       "id": self.id,
       "org_text": self.org_text,

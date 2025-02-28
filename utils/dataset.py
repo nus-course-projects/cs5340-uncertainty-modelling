@@ -2,10 +2,12 @@ from io import BytesIO
 import json
 import os
 import struct
+from typing import Iterable, Tuple
 import torch
 import cv2
 import matplotlib.pyplot as plt
 import av
+from utils.metadata import MetadataDict
 
 
 class VideoPackerWithIndex:
@@ -87,6 +89,18 @@ class StreamingVideoDataset(torch.utils.data.Dataset):
 
     return torch.stack(frames)
 
+  def iterate_metadata(self) -> Iterable[MetadataDict]:
+    with open(self.binary_file, 'rb') as f:
+      for entry in self.index:
+        f.seek(entry['offset'])
+        video_len = struct.unpack('I', f.read(4))[0]
+        f.seek(video_len, os.SEEK_CUR)  # Skip over video data
+
+        metadata_len = struct.unpack('I', f.read(4))[0]
+        metadata_bytes = f.read(metadata_len)
+        metadata = json.loads(metadata_bytes.decode('utf-8'))
+        yield metadata
+
 
 def show_video_frames(video_tensor: torch.Tensor) -> None:
   video_numpy = video_tensor.permute(0, 2, 3, 1).numpy()
@@ -94,3 +108,22 @@ def show_video_frames(video_tensor: torch.Tensor) -> None:
     plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     plt.axis('off')
     plt.show()
+
+
+def load_msasl(data_dir: str, label_threshold: int) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
+  test_binary_file = os.path.join(data_dir, "test", "dataset.bin")
+  test_index_file = os.path.join(data_dir, "test", "index.json")
+  test_dataset = StreamingVideoDataset(test_binary_file, test_index_file, label_threshold)
+  print(f"[TEST] Loaded {len(test_dataset)} videos with label < {label_threshold}")
+
+  train_binary_file = os.path.join(data_dir, "train", "dataset.bin")
+  train_index_file = os.path.join(data_dir, "train", "index.json")
+  train_dataset = StreamingVideoDataset(train_binary_file, train_index_file, label_threshold)
+  print(f"[TRAIN] Loaded {len(train_dataset)} videos with label < {label_threshold}")
+
+  validation_binary_file = os.path.join(data_dir, "validation", "dataset.bin")
+  validation_index_file = os.path.join(data_dir, "validation", "index.json")
+  validation_dataset = StreamingVideoDataset(validation_binary_file, validation_index_file, label_threshold)
+  print(f"[VALIDATION] Loaded {len(validation_dataset)} videos with label < {label_threshold}")
+
+  return test_dataset, train_dataset, validation_dataset
