@@ -1,0 +1,5 @@
+data/
+packed/
+venv/
+.mypy_cache/
+**/__pycache__/
