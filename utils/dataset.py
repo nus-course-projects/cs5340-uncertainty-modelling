@@ -7,6 +7,7 @@ import torch
 import cv2
 import matplotlib.pyplot as plt
 import av
+from tqdm import tqdm
 from utils.metadata import MetadataDict
 
 
@@ -25,7 +26,7 @@ class VideoPackerWithIndex:
   def pack(self) -> None:
     with open(self.output_file, 'wb') as f:
       f.write(struct.pack('I', len(self.metadata)))
-      for entry in self.metadata:
+      for entry in tqdm(self.metadata):
         video_path = os.path.join(self.videos_folder, f"{entry['filename']}.mp4")
         with open(video_path, 'rb') as vf:
           video_bytes = vf.read()
@@ -111,17 +112,17 @@ def show_video_frames(video_tensor: torch.Tensor) -> None:
 
 
 def load_msasl(data_dir: str, label_threshold: int) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
-  test_binary_file = os.path.join(data_dir, "test", "dataset.bin")
+  test_binary_file = os.path.join(data_dir, "test", "test.bin")
   test_index_file = os.path.join(data_dir, "test", "index.json")
   test_dataset = StreamingVideoDataset(test_binary_file, test_index_file, label_threshold)
   print(f"[TEST] Loaded {len(test_dataset)} videos with label < {label_threshold}")
 
-  train_binary_file = os.path.join(data_dir, "train", "dataset.bin")
+  train_binary_file = os.path.join(data_dir, "train", "train.bin")
   train_index_file = os.path.join(data_dir, "train", "index.json")
   train_dataset = StreamingVideoDataset(train_binary_file, train_index_file, label_threshold)
   print(f"[TRAIN] Loaded {len(train_dataset)} videos with label < {label_threshold}")
 
-  validation_binary_file = os.path.join(data_dir, "validation", "dataset.bin")
+  validation_binary_file = os.path.join(data_dir, "validation", "validation.bin")
   validation_index_file = os.path.join(data_dir, "validation", "index.json")
   validation_dataset = StreamingVideoDataset(validation_binary_file, validation_index_file, label_threshold)
   print(f"[VALIDATION] Loaded {len(validation_dataset)} videos with label < {label_threshold}")
