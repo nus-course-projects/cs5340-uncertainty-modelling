@@ -37,6 +37,8 @@ If you see the dependencies in [pyproject.toml](./pyproject.toml), you'll see th
 ### OpenCV
 The default package for opencv available on pypi is compiled for CPU only. To use opencv with CUDA support, we need to build it from source.
 
+Clone the [opencv](https://github.com/opencv/opencv) and [opencv_contrib](https://github.com/opencv/opencv_contrib) repositories into a subfolder called tools
+
 In the [tools](./tools/) directory, you will see the following structure:
 ```
 tools
