@@ -88,7 +88,7 @@ For example, on the GTX 1650 the above command will be `./build-opencv.sh 75`
 ## Using the Dataset
 
 You can download the dataset from Google Drive under [Uncertainty Modeling Dataset](https://drive.google.com/drive/u/0/folders/1mzAql9-bdX59mUN7_TDTzLQ8Sb68ELqi).
-There are two main folders: `bin` and `zip`. If you wish to download the dataset as a single binary file, use the bin folder. If you wish to have all the preprocessed videos as separate files, use the zip folder. Personally I feel the single binary file should be fine too. As the file is opened in `'rb'` mode, the OS does not lock it and multiple child processes can read from the file. If you are constrained by your system's IO, use the single binary file, else use the zipped mp4 files.
+There are two main folders: `bin` and `zip`. If you wish to download the dataset as a single binary file, use the bin folder. If you wish to have all the preprocessed videos as separate files, use the zip folder. Personally I feel the single binary file should be fine too. As the file is opened in `'rb'` mode, the OS does not lock it and multiple child processes can read from the file, plus frequence accesses to the same file can be cached so we might see slight benefits on the IO imo. If you are constrained by your system's IO, use the single binary file, else use the zipped mp4 files.
 
 ### Dataset Loading for the binary file
 
