@@ -25,7 +25,7 @@ We use Poetry for dependency management as it let's us lock dependencies using a
 pip install poetry
 ```
 
-Then, install the project dependencies
+Then, install the project dependencies (Check below about Cuda before doing this)
 ```shell
 poetry install
 ```
@@ -82,6 +82,44 @@ For example, on the GTX 1650 the above command will be `./build-opencv.sh 75`
 - Install OpenCV in the virtual environment
 ```shell
 ./install-opencv.sh
+```
+
+## If you don't need CUDA
+
+Do the following before poetry install if you don't need CUDA support
+
+- Delete the following lines from [pyproject.toml](./pyproject.toml):
+```
+...
+[tool.poetry.dependencies]
+...
+nvidia-dali-cuda120 = "^1.47.0"  <------ Delete this line
+cupy-cuda12x = "^13.4.0"  <------ Delete this line
+torch = {version = "^2.6.0+cu126", source = "pytorch"}  <------ Delete this line
+torchvision = {version = "^0.21.0+cu126", source = "pytorch"}  <------ Delete this line
+torchaudio = {version = "^2.6.0+cu126", source = "pytorch"}  <------ Delete this line
+...
+
+Delete all of these lines below
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+priority = "explicit"
+```
+
+- Delete the poetry lock file
+```shell
+rm poetry.lock
+```
+
+- Install
+```shell
+poetry install
+```
+
+- Add Dependencies
+```shell
+poetry add torch torchvision opencv-python
 ```
 
 
