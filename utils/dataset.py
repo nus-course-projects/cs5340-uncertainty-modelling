@@ -4,10 +4,11 @@ import os
 import struct
 from typing import Iterable, Tuple
 import torch
-import cv2
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import av
 from tqdm import tqdm
+from IPython.display import HTML
 from utils.metadata import MetadataDict
 
 
@@ -102,13 +103,26 @@ class StreamingVideoDataset(torch.utils.data.Dataset):
         metadata = json.loads(metadata_bytes.decode('utf-8'))
         yield metadata
 
+  def show_video(self, index: int) -> None:
+    video, _, _ = self[index]
+    video_numpy = video.permute(0, 2, 3, 1).numpy()  # Convert to (Frames, Height, Width, Channels)
 
-def show_video_frames(video_tensor: torch.Tensor) -> None:
-  video_numpy = video_tensor.permute(0, 2, 3, 1).numpy()
-  for frame in video_numpy:
-    plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    plt.axis('off')
-    plt.show()
+    fig, ax = plt.subplots(figsize=(video_numpy.shape[2] / 100, video_numpy.shape[1] / 100))
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.axis('off')
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    frame_display = ax.imshow(video_numpy[0])
+    ax.axis('off')
+
+    def update(frame_idx):
+      frame_display.set_data(video_numpy[frame_idx])
+      return frame_display,
+
+    anim = animation.FuncAnimation(fig, update, frames=len(video_numpy), interval=50, blit=True)
+    plt.close(fig)
+    return HTML(anim.to_jshtml())
 
 
 def load_msasl(data_dir: str, label_threshold: int) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
