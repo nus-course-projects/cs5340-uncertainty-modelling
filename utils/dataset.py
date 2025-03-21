@@ -2,10 +2,14 @@ from io import BytesIO
 import json
 import os
 import struct
+from typing import Iterable, Tuple
 import torch
-import cv2
 import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 import av
+from tqdm import tqdm
+from IPython.display import HTML
+from utils.metadata import MetadataDict
 
 
 class VideoPackerWithIndex:
@@ -23,7 +27,7 @@ class VideoPackerWithIndex:
   def pack(self) -> None:
     with open(self.output_file, 'wb') as f:
       f.write(struct.pack('I', len(self.metadata)))
-      for entry in self.metadata:
+      for entry in tqdm(self.metadata):
         video_path = os.path.join(self.videos_folder, f"{entry['filename']}.mp4")
         with open(video_path, 'rb') as vf:
           video_bytes = vf.read()
@@ -87,10 +91,54 @@ class StreamingVideoDataset(torch.utils.data.Dataset):
 
     return torch.stack(frames)
 
+  def iterate_metadata(self) -> Iterable[MetadataDict]:
+    with open(self.binary_file, 'rb') as f:
+      for entry in self.index:
+        f.seek(entry['offset'])
+        video_len = struct.unpack('I', f.read(4))[0]
+        f.seek(video_len, os.SEEK_CUR)  # Skip over video data
 
-def show_video_frames(video_tensor: torch.Tensor) -> None:
-  video_numpy = video_tensor.permute(0, 2, 3, 1).numpy()
-  for frame in video_numpy:
-    plt.imshow(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    plt.axis('off')
-    plt.show()
+        metadata_len = struct.unpack('I', f.read(4))[0]
+        metadata_bytes = f.read(metadata_len)
+        metadata = json.loads(metadata_bytes.decode('utf-8'))
+        yield metadata
+
+  def show_video(self, index: int) -> None:
+    video, _, _ = self[index]
+    video_numpy = video.permute(0, 2, 3, 1).numpy()  # Convert to (Frames, Height, Width, Channels)
+
+    fig, ax = plt.subplots(figsize=(video_numpy.shape[2] / 100, video_numpy.shape[1] / 100))
+    ax.set_frame_on(False)
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.axis('off')
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+    frame_display = ax.imshow(video_numpy[0])
+    ax.axis('off')
+
+    def update(frame_idx):
+      frame_display.set_data(video_numpy[frame_idx])
+      return frame_display,
+
+    anim = animation.FuncAnimation(fig, update, frames=len(video_numpy), interval=50, blit=True)
+    plt.close(fig)
+    return HTML(anim.to_jshtml())
+
+
+def load_msasl(data_dir: str, label_threshold: int) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
+  test_binary_file = os.path.join(data_dir, "test", "test.bin")
+  test_index_file = os.path.join(data_dir, "test", "index.json")
+  test_dataset = StreamingVideoDataset(test_binary_file, test_index_file, label_threshold)
+  print(f"[TEST] Loaded {len(test_dataset)} videos with label < {label_threshold}")
+
+  train_binary_file = os.path.join(data_dir, "train", "train.bin")
+  train_index_file = os.path.join(data_dir, "train", "index.json")
+  train_dataset = StreamingVideoDataset(train_binary_file, train_index_file, label_threshold)
+  print(f"[TRAIN] Loaded {len(train_dataset)} videos with label < {label_threshold}")
+
+  validation_binary_file = os.path.join(data_dir, "validation", "validation.bin")
+  validation_index_file = os.path.join(data_dir, "validation", "index.json")
+  validation_dataset = StreamingVideoDataset(validation_binary_file, validation_index_file, label_threshold)
+  print(f"[VALIDATION] Loaded {len(validation_dataset)} videos with label < {label_threshold}")
+
+  return test_dataset, train_dataset, validation_dataset

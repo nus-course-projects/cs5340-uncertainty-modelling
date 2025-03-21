@@ -7,15 +7,20 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
-numpy = "^2.2.3"
+python = ">=3.11,<3.14"
 pandas = "^2.2.3"
 matplotlib = "^3.10.1"
 tqdm = "^4.67.1"
 yt-dlp = "^2025.2.19"
-torch = "^2.6.0"
-opencv-python = "^4.11.0.86"
 av = "^14.2.0"
+nvidia-dali-cuda120 = "^1.47.0"
+cupy-cuda12x = "^13.4.0"
+torch = {version = "^2.6.0+cu126", source = "pytorch"}
+torchvision = {version = "^0.21.0+cu126", source = "pytorch"}
+torchaudio = {version = "^2.6.0+cu126", source = "pytorch"}
+numpy = "<2"
+pynvml = "^12.0.0"
+ffmpeg-python = "^0.2.0"
 
 
 [tool.poetry.group.dev.dependencies]
@@ -24,3 +29,8 @@ cblack = "^22.6.0"
 [build-system]
 requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
+
+[[tool.poetry.source]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu126"
+priority = "explicit"
