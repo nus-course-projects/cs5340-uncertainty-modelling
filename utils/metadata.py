@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import TypedDict, List
 
 
 class MetadataDict(TypedDict):
@@ -19,7 +19,7 @@ class MetadataDict(TypedDict):
   fps: float
   url: str
   text: str
-  box: list[float]
+  box: List[float]
   filename: str
 
 
@@ -41,7 +41,7 @@ class Metadata:
   fps: float
   url: str
   text: str
-  box: list[float]
+  box: List[float]
   filename: str
 
   def as_dict(self) -> MetadataDict:

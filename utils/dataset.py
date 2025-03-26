@@ -10,7 +10,94 @@ import av
 from tqdm import tqdm
 from IPython.display import HTML
 from utils.metadata import MetadataDict
+import numpy as np
 
+class KeypointDataset(torch.utils.data.Dataset):
+    """Dataset class for loading keypoint data from npz files"""
+    
+    def __init__(self, npz_path: str, label_map: dict = None):
+        """
+        Initialize KeypointDataset
+        
+        Args:
+            npz_path (str): Path to .npz file containing keypoint data
+            label_map (dict, optional): Mapping from original labels to consecutive integers
+        """
+        # Load data from npz file
+        data = np.load(npz_path)
+        self.keypoints = data['keypoints']  # Shape: (N, T, K, 2) 
+        self.keypoint_scores = data['keypoint_scores']  # Shape: (N, T, K, 1)
+        self.labels = data['labels']  # Shape: (N,)
+        
+        # Apply label mapping if provided
+        if label_map is not None:
+          # Filter to only include labels in the map
+          mask = np.isin(self.labels, list(label_map.keys()))
+          self.keypoints = self.keypoints[mask]
+          self.keypoint_scores = self.keypoint_scores[mask]
+          self.labels = np.array([label_map[label] for label in self.labels[mask]])
+            
+        # Convert to torch tensors
+        self.keypoints = torch.from_numpy(self.keypoints).float()
+        self.keypoint_scores = torch.from_numpy(self.keypoint_scores).float()
+        self.labels = torch.from_numpy(self.labels).long()
+        
+    def __len__(self):
+        return len(self.labels)
+        
+    def __getitem__(self, idx):
+        """
+        Get a single sample
+        
+        Args:
+            idx (int): Index of sample to get
+            
+        Returns:
+            tuple: (features, label) where features combines keypoints and scores
+        """
+        keypoints = self.keypoints[idx] / 224.0  # Shape: (T, K, 2)
+        scores = self.keypoint_scores[idx]  # Shape: (T, K, 1) 
+        label = self.labels[idx]
+        
+        # Combine keypoints and scores into features
+        features = torch.cat([keypoints, scores], dim=-1)  # Shape: (T, K, 3)
+        
+        return features, label
+
+def load_keypoints(data_dir: str, top_k_labels: int = None):
+    """
+    Load keypoints data from separate test, train, and validation files
+    
+    Args:
+        data_dir (str): Directory containing keypoint data files
+        top_k_labels (int, optional): Only include the top k most frequent labels
+        
+    Returns:
+        tuple: (test_dataset, train_dataset, validation_dataset)
+    """
+    # Load separate datasets for test, train, and validation
+    test_path = os.path.join(data_dir, "keypoints_test.npz")
+    train_path = os.path.join(data_dir, "keypoints_train.npz")
+    val_path = os.path.join(data_dir, "keypoints_validation.npz")
+    
+    # First, determine the label mapping from the training set
+    temp_data = np.load(train_path)
+    train_labels = temp_data['labels']
+    
+    # Create label map based on top_k most frequent labels in training set
+    label_map = None
+    if top_k_labels is not None:
+        unique_labels, counts = np.unique(train_labels, return_counts=True)
+        top_k_indices = np.argsort(counts)[-top_k_labels:]
+        top_k_label_values = unique_labels[top_k_indices]
+        label_map = {label: i for i, label in enumerate(top_k_label_values)}
+    
+    # Create dataset objects for each split using the same label map
+    train_dataset = KeypointDataset(train_path, label_map)
+    test_dataset = KeypointDataset(test_path, label_map)
+    val_dataset = KeypointDataset(val_path, label_map)
+    
+    return test_dataset, train_dataset, val_dataset
 
 class VideoPackerWithIndex:
   def __init__(self, videos_folder: str, metadata_file: str, output_file: str, index_file: str) -> None:
@@ -54,18 +141,24 @@ class VideoPackerWithIndex:
 
 
 class StreamingVideoDataset(torch.utils.data.Dataset):
-  def __init__(self, binary_file: str, index_file: str, label_threshold: int) -> None:
+  def __init__(self, binary_file: str, index_file: str, label_map: dict = None) -> None:
     self.binary_file = binary_file
-    self.label_threshold = label_threshold
-
+    
     with open(index_file, 'r', encoding='utf-8') as f:
       self.full_index = json.load(f)
-    self.index = [entry for entry in self.full_index if entry['label'] < label_threshold]
+    
+    if label_map is not None:
+      # Filter index to only include entries with labels in the provided label map
+      self.index = [entry for entry in self.full_index if entry['label'] in label_map]
+      self.label_map = label_map
+    else:
+      self.index = self.full_index
+      self.label_map = {label: i for i, label in enumerate(set(entry['label'] for entry in self.full_index))}
 
   def __len__(self) -> int:
     return len(self.index)
 
-  def __getitem__(self, idx: int) -> tuple[torch.Tensor, int, dict]:
+  def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, dict]:
     entry = self.index[idx]
     with open(self.binary_file, 'rb') as f:
       f.seek(entry['offset'])
@@ -76,7 +169,9 @@ class StreamingVideoDataset(torch.utils.data.Dataset):
       metadata = json.loads(metadata_bytes.decode('utf-8'))
 
     video = self.decode_video(video_bytes)
-    label = metadata['label']
+    original_label = metadata['label']
+    # Map the original label to the new label index
+    label = self.label_map.get(original_label, -1)  # -1 for labels not in the map (shouldn't happen)
     return video, label, metadata
 
   @staticmethod
@@ -125,20 +220,41 @@ class StreamingVideoDataset(torch.utils.data.Dataset):
     return HTML(anim.to_jshtml())
 
 
-def load_msasl(data_dir: str, label_threshold: int) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
+def load_msasl(data_dir: str, top_k_labels: int = None) -> Tuple[StreamingVideoDataset, StreamingVideoDataset, StreamingVideoDataset]:
+  # First load all labels from the training dataset to determine the label mapping
+  train_index_file = os.path.join(data_dir, "train", "index.json")
+  with open(train_index_file, 'r', encoding='utf-8') as f:
+    train_index = json.load(f)
+  
+  # Create label map based on top_k_labels
+  label_map = None
+  if top_k_labels is not None:
+    # Get the top k most frequent labels
+    label_counts = {}
+    for entry in train_index:
+      label = entry['label']
+      label_counts[label] = label_counts.get(label, 0) + 1
+    
+    # Sort labels by frequency (descending) and take top k
+    top_labels = sorted(label_counts.keys(), key=lambda x: label_counts[x], reverse=True)[:top_k_labels]
+    label_map = {label: i for i, label in enumerate(top_labels)}
+  
+  # Create datasets using the same label map
+  train_binary_file = os.path.join(data_dir, "train", "train.bin")
+  train_dataset = StreamingVideoDataset(train_binary_file, train_index_file, label_map)
+  print(f"[TRAIN] Loaded {len(train_dataset)} videos" + 
+        (f" with top {top_k_labels} labels" if top_k_labels else ""))
+  
   test_binary_file = os.path.join(data_dir, "test", "test.bin")
   test_index_file = os.path.join(data_dir, "test", "index.json")
-  test_dataset = StreamingVideoDataset(test_binary_file, test_index_file, label_threshold)
-  print(f"[TEST] Loaded {len(test_dataset)} videos with label < {label_threshold}")
-
-  train_binary_file = os.path.join(data_dir, "train", "train.bin")
-  train_index_file = os.path.join(data_dir, "train", "index.json")
-  train_dataset = StreamingVideoDataset(train_binary_file, train_index_file, label_threshold)
-  print(f"[TRAIN] Loaded {len(train_dataset)} videos with label < {label_threshold}")
+  test_dataset = StreamingVideoDataset(test_binary_file, test_index_file, label_map)
+  print(f"[TEST] Loaded {len(test_dataset)} videos" + 
+        (f" with top {top_k_labels} labels" if top_k_labels else ""))
 
   validation_binary_file = os.path.join(data_dir, "validation", "validation.bin")
   validation_index_file = os.path.join(data_dir, "validation", "index.json")
-  validation_dataset = StreamingVideoDataset(validation_binary_file, validation_index_file, label_threshold)
-  print(f"[VALIDATION] Loaded {len(validation_dataset)} videos with label < {label_threshold}")
+  validation_dataset = StreamingVideoDataset(validation_binary_file, validation_index_file, label_map)
+  print(f"[VALIDATION] Loaded {len(validation_dataset)} videos" + 
+        (f" with top {top_k_labels} labels" if top_k_labels else ""))
 
   return test_dataset, train_dataset, validation_dataset

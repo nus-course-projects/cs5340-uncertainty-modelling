@@ -6,22 +6,31 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_video
 import torch.nn as nn
 import torch.optim as optim
-from torchvision.models.video import r3d_18
+from model.ResNet3D import ResNet3D
+from model.I3D import InceptionI3d
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
     UniformTemporalSubsample,
-    ShortSideScale,
-    UniformCropVideo,
+    Div255,
     Normalize,
-    Div255
 )
-from torchvision.transforms import Compose, Lambda, CenterCrop
+from torchvision.transforms import Compose, Lambda, CenterCrop, Resize, RandomAffine
 from tqdm import tqdm
-import gc
 import argparse
-
+from datetime import datetime
 from accelerate import Accelerator
+from accelerate.utils import ProjectConfiguration
 from utils.dataset import load_msasl
+
+class RandomHorizontalFlip(nn.Module):
+    def __init__(self, p=0.5):
+        super().__init__()
+        self.p = p
+
+    def forward(self, x):
+        if random.random() < self.p:
+            return x.flip(3)
+        return x
 
 # A helper dataset wrapper that applies a transform to each sample.
 class TransformDataset(Dataset):
@@ -56,7 +65,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         optimizer.zero_grad()
         outputs = model(videos)
         loss = criterion(outputs, labels)
-        loss.backward()
+        accelerator.backward(loss)
         optimizer.step()
 
         running_loss += loss.item() * videos.size(0)
@@ -91,35 +100,70 @@ def main():
     parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training")
     parser.add_argument("--num_workers", type=int, default=8, help="Number of workers for DataLoader")
     parser.add_argument("--num_frames", type=int, default=10, help="Number of frames to sample from each video")
+    parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")
+    parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for the optimizer")
+    parser.add_argument("--frozen_layers", type=int, default=None, help="Number of frozen layers for the model")
+    parser.add_argument("--model", type=str, default="resnet", choices=["resnet", "i3d"], help="Model to use for training")
+    parser.add_argument("--top_k_labels", type=int, default=100, help="Number of top k labels to use for training")
     args = parser.parse_args()
 
+    # Define experiment variables.
     batch_size = args.batch_size
     num_workers = args.num_workers
     num_frames = args.num_frames
+    num_epochs = args.num_epochs
+    learning_rate = args.learning_rate
+    num_classes = args.top_k_labels
 
-    # Initialize Accelerator (mixed precision is set via accelerate launch)
-    accelerator = Accelerator()
+    # Create a ProjectConfiguration object and initialize Accelerator with TensorBoard logging.
+    config = ProjectConfiguration(project_dir=".", logging_dir="runs")
+    global accelerator
+    accelerator = Accelerator(log_with="tensorboard", project_config=config)
 
-    # Settings
-    num_epochs = 100
-    learning_rate = 0.001
-    num_classes = 1000
-    test_dataset, train_dataset, validation_dataset = load_msasl("bin", num_classes)
+    # Log hyperparameters.
+    hparams = {
+        "num_epochs": num_epochs,
+        "learning_rate": learning_rate,
+        "batch_size": batch_size,
+        "num_frames": num_frames,
+        "num_classes": num_classes,
+        "num_workers": num_workers,
+        "model_class": args.model,
+        "frozen_layers": args.frozen_layers
+    }
+    accelerator.init_trackers(f'3DCNN_{args.model}_{args.frozen_layers}')
+    tb_tracker = accelerator.get_tracker("tensorboard")
 
-    video_transform = ApplyTransformToKey(
+    # Load datasets.
+    test_dataset, train_dataset, validation_dataset = load_msasl("bin", top_k_labels=num_classes)
+
+    train_transform = ApplyTransformToKey(
         key="video",
         transform=Compose([
-            Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,C,H,W) -> (C,T,H,W)
+            Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
             UniformTemporalSubsample(num_frames),
+            Resize(112) if args.model == "resnet" else Resize(224),
+            RandomHorizontalFlip(),
             Div255(),
-            CenterCrop(224),
-            Normalize(mean=[0.45, 0.45, 0.45], std=[0.225, 0.225, 0.225])
+            Normalize(mean=[0.43216, 0.394666, 0.37645], std=[0.22803, 0.22145, 0.216989]) if args.model == "resnet" \
+                else Lambda(lambda x: (x-0.5)*2.0),
+        ])
+    )
+    test_transform = ApplyTransformToKey(
+        key="video",
+        transform=Compose([
+            Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
+            UniformTemporalSubsample(num_frames),
+            Resize(112) if args.model == "resnet" else Resize(224),
+            Div255(),
+            Normalize(mean=[0.43216, 0.394666, 0.37645], std=[0.22803, 0.22145, 0.216989]) if args.model == "resnet" \
+                else Lambda(lambda x: (x-0.5)*2.0),
         ])
     )
     # Wrap each dataset with the transformation.
-    train_dataset = TransformDataset(train_dataset, video_transform)
-    validation_dataset = TransformDataset(validation_dataset, video_transform)
-    test_dataset = TransformDataset(test_dataset, video_transform)
+    train_dataset = TransformDataset(train_dataset, train_transform)
+    validation_dataset = TransformDataset(validation_dataset, test_transform)
+    test_dataset = TransformDataset(test_dataset, test_transform)
 
     # Create DataLoaders.
     train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
@@ -128,20 +172,34 @@ def main():
     device = accelerator.device
     print("Using device:", device)
 
-    model = r3d_18(pretrained=False, progress=True, num_classes=num_classes)
+    if args.model == "resnet":
+        model = ResNet3D(num_classes=num_classes, frozen_layers=args.frozen_layers)
+    elif args.model == "i3d":
+        model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers)
+    else:
+        raise ValueError(f"Invalid model: {args.model}")
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-
+    # optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     # Prepare with accelerator.
     model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
 
+    best_val_acc = 0.0
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
         val_loss, val_acc = validate_epoch(model, val_loader, criterion, device)
+        accelerator.log({"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc}, step=epoch)
         accelerator.print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
+        # Save the best model based on validation accuracy.
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            accelerator.save_model(model, "best_video_classification_model")
+            accelerator.print(f"New best model saved with Val Acc: {best_val_acc:.4f}")
+        metrics = {"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc, "best_val_acc": best_val_acc}
+        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}', global_step=epoch)
     accelerator.wait_for_everyone()
     torch.save(model.state_dict(), "video_classification_model_resnet.pth")
     accelerator.print("Training complete. Model saved as video_classification_model_resnet.pth")
