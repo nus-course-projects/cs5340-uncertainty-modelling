@@ -13,6 +13,9 @@ from pytorchvideo.transforms import (
     UniformTemporalSubsample,
     Div255,
     Normalize,
+    # The modules above are only compatible with torchvision 0.19.
+    # If you use torchvision 0.21 or above, change functional_tensor to functional in line 9 of:
+    # $ENV_INSTALLATION/lib/python3.12/site-packages/pytorchvideo/transforms/augmentations.py
 )
 from torchvision.transforms import Compose, Lambda, CenterCrop, Resize, RandomAffine
 from tqdm import tqdm
@@ -21,6 +24,7 @@ from datetime import datetime
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
 from utils.dataset import load_msasl
+from utils.optical_flow import OpticalFlowTransform
 
 class RandomHorizontalFlip(nn.Module):
     def __init__(self, p=0.5):
@@ -104,6 +108,7 @@ def main():
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for the optimizer")
     parser.add_argument("--frozen_layers", type=int, default=None, help="Number of frozen layers for the model")
     parser.add_argument("--model", type=str, default="resnet", choices=["resnet", "i3d"], help="Model to use for training")
+    parser.add_argument("--input_type", type=str, default="rgb", choices=["rgb", "optical_flow"], help="Input image of the model. Only for I3D model.")
     parser.add_argument("--top_k_labels", type=int, default=100, help="Number of top k labels to use for training")
     args = parser.parse_args()
 
@@ -129,6 +134,7 @@ def main():
         "num_classes": num_classes,
         "num_workers": num_workers,
         "model_class": args.model,
+        "input_type": args.input_type,
         "frozen_layers": args.frozen_layers
     }
     accelerator.init_trackers(f'3DCNN_{args.model}_{args.frozen_layers}')
@@ -140,6 +146,7 @@ def main():
     train_transform = ApplyTransformToKey(
         key="video",
         transform=Compose([
+            OpticalFlowTransform() if args.input_type  == "optical_flow" else Lambda(lambda x: x),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
             UniformTemporalSubsample(num_frames),
             Resize(112) if args.model == "resnet" else Resize(224),
@@ -152,6 +159,7 @@ def main():
     test_transform = ApplyTransformToKey(
         key="video",
         transform=Compose([
+            OpticalFlowTransform() if args.input_type  == "optical_flow" else Lambda(lambda x: x),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
             UniformTemporalSubsample(num_frames),
             Resize(112) if args.model == "resnet" else Resize(224),
@@ -175,7 +183,12 @@ def main():
     if args.model == "resnet":
         model = ResNet3D(num_classes=num_classes, frozen_layers=args.frozen_layers)
     elif args.model == "i3d":
-        model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers)
+        if args.input_type == "rgb":
+            model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers)
+        elif args.input_type == "optical_flow":
+            model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers, in_channels=2, input_type="optical_flow")
+        else:
+            raise ValueError(f"Invalid input type for I3D: {args.input_type}")
     else:
         raise ValueError(f"Invalid model: {args.model}")
     model = model.to(device)

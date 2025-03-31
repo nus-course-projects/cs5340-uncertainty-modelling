@@ -195,7 +195,7 @@ class InceptionI3d(nn.Module):
     )
 
     def __init__(self, num_classes=400, frozen_layers=None, spatial_squeeze=True,
-                 final_endpoint='Logits', name='inception_i3d', in_channels=3):
+                 final_endpoint='Logits', name='inception_i3d', in_channels=3, input_type='rgb'):
         """Initializes I3D model instance.
         Args:
           num_classes: The number of outputs in the logit layer (default 400, which
@@ -211,6 +211,7 @@ class InceptionI3d(nn.Module):
           name: A string (optional). The name of this module.
           frozen_layers: The number of layers to freeze. If None, all layers are frozen. 
           between 0 and 16.
+          input_type: A string (optional). The input type of the image, either rgb or optical_flow
         Raises:
           ValueError: if `final_endpoint` is not recognized.
         """
@@ -322,8 +323,12 @@ class InceptionI3d(nn.Module):
             os.makedirs(temp_dir, exist_ok=True)
             
             # Define the checkpoint URL and local path
-            checkpoint_url = 'https://github.com/piergiaj/pytorch-i3d/raw/refs/heads/master/models/rgb_imagenet.pt'
-            checkpoint_path = os.path.join(temp_dir, 'rgb_imagenet.pt')
+            if (input_type == 'rgb'):
+                checkpoint_url = 'https://github.com/piergiaj/pytorch-i3d/raw/refs/heads/master/models/rgb_imagenet.pt'
+                checkpoint_path = os.path.join(temp_dir, 'rgb_imagenet.pt')
+            else:
+                checkpoint_url = 'https://github.com/piergiaj/pytorch-i3d/raw/refs/heads/master/models/flow_imagenet.pt'
+                checkpoint_path = os.path.join(temp_dir, 'flow_imagenet.pt')
             
             # Download the checkpoint if it doesn't exist
             if not os.path.exists(checkpoint_path):
