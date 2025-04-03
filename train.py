@@ -13,9 +13,10 @@ from pytorchvideo.transforms import (
     UniformTemporalSubsample,
     Div255,
     Normalize,
-    # The modules above are only compatible with torchvision 0.19.
-    # If you use torchvision 0.21 or above, change functional_tensor to functional in line 9 of:
-    # $ENV_INSTALLATION/lib/python3.12/site-packages/pytorchvideo/transforms/augmentations.py
+    # ModuleNotFoundError: No module named 'torchvision.transforms.functional_tensor'
+    # If you see this error, you can install the latest version of torchvision from source.
+    # pip install torchvision
+    # pip install "git+https://github.com/facebookresearch/pytorchvideo.git"
 )
 from torchvision.transforms import Compose, Lambda, CenterCrop, Resize, RandomAffine
 from tqdm import tqdm
