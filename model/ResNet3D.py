@@ -1,8 +1,9 @@
 import torch.nn as nn
-from torchvision.models.video import r3d_18, r2plus1d_18
+from torchvision.models.video import r3d_18, r2plus1d_18, mc3_18
+from bayesian_torch.models.dnn_to_bnn import dnn_to_bnn
 
 class ResNet3D(nn.Module):
-    def __init__(self, num_classes, frozen_layers=None):
+    def __init__(self, num_classes, frozen_layers=None, bayesian_layers=None, bayesian_options=None):
         """
         Args:
             num_classes (int): Number of output classes.
@@ -15,12 +16,12 @@ class ResNet3D(nn.Module):
             # Use pretrained weights, which expect 400 classes
             base_model = r2plus1d_18(pretrained=True, progress=True)
             # Replace the final fully connected layer to match num_classes
-            in_features = base_model.fc.in_features
-            base_model.fc = nn.Linear(in_features, num_classes)
             self.model = base_model
         else:
             # Initialize model without pretrained weights and with desired num_classes directly.
-            self.model = r2plus1d_18(pretrained=False, progress=True, num_classes=num_classes)
+            self.model = r2plus1d_18(pretrained=False, progress=True)
+        in_features = base_model.fc.in_features
+        self.model.fc = nn.Linear(in_features, num_classes)
 
         # Freeze layers if frozen_layers is specified
         if frozen_layers is not None:
@@ -47,5 +48,23 @@ class ResNet3D(nn.Module):
                 for param in self.model.layer4.parameters():
                     param.requires_grad = False
 
+        if bayesian_layers is not None:
+            if bayesian_options is None:
+                raise ValueError("bayesian_options must be provided if bayesian_layers is not None.")
+            if not (0 <= bayesian_layers <= 6):
+                raise ValueError("bayesian_layers must be between 0 and 6.")
+            if bayesian_layers <= 1:
+                dnn_to_bnn(self.model.stem, bayesian_options)
+            if bayesian_layers <= 2:
+                dnn_to_bnn(self.model.layer1, bayesian_options)
+            if bayesian_layers <= 3:
+                dnn_to_bnn(self.model.layer2, bayesian_options)
+            if bayesian_layers <= 4:
+                dnn_to_bnn(self.model.layer3, bayesian_options)
+            if bayesian_layers <= 5:
+                dnn_to_bnn(self.model.layer4, bayesian_options)
+            if bayesian_layers <= 6:
+                dnn_to_bnn(self.model.fc, bayesian_options)
+                
     def forward(self, x):
         return self.model(x)

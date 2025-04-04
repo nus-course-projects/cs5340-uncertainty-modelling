@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.optim as optim
 from model.ResNet3D import ResNet3D
 from model.I3D import InceptionI3d
+from bayesian_torch.models.dnn_to_bnn import get_kl_loss
 from pytorchvideo.transforms import (
     ApplyTransformToKey,
     UniformTemporalSubsample,
@@ -67,9 +68,11 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     for videos, labels, _ in tqdm(dataloader, desc="Training batches", leave=False):
         videos = videos.to(device)
         labels = labels.to(device)
+        B, T, C, H, W = videos.shape
         optimizer.zero_grad()
         outputs = model(videos)
-        loss = criterion(outputs, labels)
+        kl_loss = get_kl_loss(model)
+        loss = criterion(outputs, labels) + kl_loss / B
         accelerator.backward(loss)
         optimizer.step()
 
@@ -77,24 +80,35 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         _, preds = torch.max(outputs, 1)
         total += labels.size(0)
         correct += (preds == labels).sum().item()
+        
+        # Print KL loss and total loss
+        # accelerator.print(
+        #     f"KL Loss: {kl_loss.item():.4f}, Total Loss: {loss.item():.4f}"
+        # )
+        
     epoch_loss = running_loss / total if total > 0 else float('inf')
     epoch_acc = correct / total if total > 0 else 0
     return epoch_loss, epoch_acc
 
-def validate_epoch(model, dataloader, criterion, device):
+def validate_epoch(model, dataloader, criterion, device, num_monte_carlo=10):
     model.eval()
     running_loss = 0.0
     correct = 0
     total = 0
     with torch.no_grad():
         for videos, labels, _ in tqdm(dataloader, desc="Validation batches", leave=False):
-            videos = videos.to(device)
-            labels = labels.to(device)
-            outputs = model(videos)
-            loss = criterion(outputs, labels)
-            running_loss += loss.item() * videos.size(0)
-            _, preds = torch.max(outputs, 1)
-            total += labels.size(0)
+            output_mc = []
+            for _ in range(num_monte_carlo):
+                videos = videos.to(device)
+                labels = labels.to(device)
+                outputs = model(videos)
+                loss = criterion(outputs, labels)
+                running_loss += loss.item() * videos.size(0)
+                preds = torch.softmax(outputs, dim=1)
+                output_mc.append(preds)
+                total += labels.size(0)
+            output_mc = torch.stack(output_mc, dim=0).mean(dim=0)
+            _, preds = torch.max(output_mc, 1)
             correct += (preds == labels).sum().item()
     epoch_loss = running_loss / total if total > 0 else float('inf')
     epoch_acc = correct / total if total > 0 else 0
@@ -107,10 +121,12 @@ def main():
     parser.add_argument("--num_frames", type=int, default=10, help="Number of frames to sample from each video")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")
     parser.add_argument("--learning_rate", type=float, default=0.001, help="Learning rate for the optimizer")
-    parser.add_argument("--frozen_layers", type=int, default=None, help="Number of frozen layers for the model")
-    parser.add_argument("--model", type=str, default="resnet", choices=["resnet", "i3d"], help="Model to use for training")
+    parser.add_argument("--frozen_layers", type=int, default=None, help="Number of frozen layers for the model, begin to this layer")
+    parser.add_argument("--bayesian_layers", type=int, default=None, help="Number of Bayesian layers for the model, this layer to end layer")
+    parser.add_argument("--model", type=str, default="resnet", choices=["resnet", "i3d"], help="Model to use for training, start layer")
     parser.add_argument("--input_type", type=str, default="rgb", choices=["rgb", "optical_flow"], help="Input image of the model. Only for I3D model.")
     parser.add_argument("--top_k_labels", type=int, default=100, help="Number of top k labels to use for training")
+    parser.add_argument("--num_monte_carlo", type=int, default=10, help="Number of Monte Carlo samples for validation")
     args = parser.parse_args()
 
     # Define experiment variables.
@@ -120,7 +136,7 @@ def main():
     num_epochs = args.num_epochs
     learning_rate = args.learning_rate
     num_classes = args.top_k_labels
-
+    num_monte_carlo = args.num_monte_carlo if args.bayesian_layers is not None else 1
     # Create a ProjectConfiguration object and initialize Accelerator with TensorBoard logging.
     config = ProjectConfiguration(project_dir=".", logging_dir="runs")
     global accelerator
@@ -136,9 +152,11 @@ def main():
         "num_workers": num_workers,
         "model_class": args.model,
         "input_type": args.input_type,
-        "frozen_layers": args.frozen_layers
+        "frozen_layers": args.frozen_layers,
+        "bayesian_layers": args.bayesian_layers,
+        "num_monte_carlo": num_monte_carlo
     }
-    accelerator.init_trackers(f'3DCNN_{args.model}_{args.frozen_layers}')
+    accelerator.init_trackers(f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}')
     tb_tracker = accelerator.get_tracker("tensorboard")
 
     # Load datasets.
@@ -180,10 +198,20 @@ def main():
 
     device = accelerator.device
     print("Using device:", device)
-
+    const_bnn_prior_parameters = {
+            "prior_mu": 0.0,
+            "prior_sigma": 1.0,
+            "posterior_mu_init": 0.0,
+            "posterior_rho_init": -3.0,
+            "type": "Reparameterization",  # Flipout or Reparameterization
+            "moped_enable": True,  # True to initialize mu/sigma from the pretrained dnn weights
+            "moped_delta": 0.5,
+    }
     if args.model == "resnet":
-        model = ResNet3D(num_classes=num_classes, frozen_layers=args.frozen_layers)
+        model = ResNet3D(num_classes=num_classes, frozen_layers=args.frozen_layers, 
+                         bayesian_layers=args.bayesian_layers, bayesian_options=const_bnn_prior_parameters)
     elif args.model == "i3d":
+        assert args.bayesian_layers is not None, "Bayesian layers not supported for I3D model yet!"
         if args.input_type == "rgb":
             model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers)
         elif args.input_type == "optical_flow":
@@ -195,7 +223,6 @@ def main():
     model = model.to(device)
 
     criterion = nn.CrossEntropyLoss()
-    # optimizer = optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     # Prepare with accelerator.
     model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
@@ -203,20 +230,20 @@ def main():
     best_val_acc = 0.0
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
         train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
-        val_loss, val_acc = validate_epoch(model, val_loader, criterion, device)
+        val_loss, val_acc = validate_epoch(model, val_loader, criterion, device, num_monte_carlo)
         accelerator.log({"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc}, step=epoch)
         accelerator.print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         # Save the best model based on validation accuracy.
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            accelerator.save_model(model, "best_video_classification_model")
+            accelerator.save_model(model, f"best_video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}")
             accelerator.print(f"New best model saved with Val Acc: {best_val_acc:.4f}")
         metrics = {"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc, "best_val_acc": best_val_acc}
-        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}', global_step=epoch)
+        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}', global_step=epoch)
     accelerator.wait_for_everyone()
-    torch.save(model.state_dict(), "video_classification_model_resnet.pth")
-    accelerator.print("Training complete. Model saved as video_classification_model_resnet.pth")
+    torch.save(model.state_dict(), f"video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}.pth")
+    accelerator.print(f"Training complete. Model saved as video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}.pth")
 
 if __name__ == "__main__":
     main()
