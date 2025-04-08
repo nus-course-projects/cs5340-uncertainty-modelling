@@ -14,14 +14,14 @@ class ResNet3D(nn.Module):
         super(ResNet3D, self).__init__()
         if frozen_layers is not None:
             # Use pretrained weights, which expect 400 classes
-            base_model = r2plus1d_18(pretrained=True, progress=True)
-            # Replace the final fully connected layer to match num_classes
-            self.model = base_model
+            self.model = r2plus1d_18(pretrained=True, progress=True)
         else:
             # Initialize model without pretrained weights and with desired num_classes directly.
             self.model = r2plus1d_18(pretrained=False, progress=True)
-        in_features = base_model.fc.in_features
-        self.model.fc = nn.Linear(in_features, num_classes)
+        in_features = self.model.fc.in_features
+        self.model.fc = nn.Sequential(            
+            nn.Linear(in_features, num_classes)
+        )
 
         # Freeze layers if frozen_layers is specified
         if frozen_layers is not None:

@@ -60,7 +60,7 @@ class TransformDataset(Dataset):
         # Return transformed video, label, and optionally metadata
         return sample["video"], sample["label"], sample.get("metadata", {})
 
-def train_epoch(model, dataloader, criterion, optimizer, device):
+def train_epoch(model, dataloader, criterion, optimizer, device, num_monte_carlo=10):
     model.train()
     running_loss = 0.0
     correct = 0
@@ -70,8 +70,16 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
         labels = labels.to(device)
         B, T, C, H, W = videos.shape
         optimizer.zero_grad()
-        outputs = model(videos)
-        kl_loss = get_kl_loss(model)
+        output_mc = []
+        kl_loss_mc = []
+        for _ in range(num_monte_carlo):
+            outputs = model(videos)
+            output_mc.append(outputs)
+            kl_loss = get_kl_loss(model) if bayesian_training else 0.0
+            kl_loss_mc.append(kl_loss)
+        outputs = torch.stack(output_mc, dim=0).mean(dim=0)
+        kl_loss = torch.stack(kl_loss_mc, dim=0).mean(dim=0)
+
         loss = criterion(outputs, labels) + kl_loss / B
         accelerator.backward(loss)
         optimizer.step()
@@ -90,6 +98,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device):
     epoch_acc = correct / total if total > 0 else 0
     return epoch_loss, epoch_acc
 
+@torch.inference_mode()
 def validate_epoch(model, dataloader, criterion, device, num_monte_carlo=10):
     model.eval()
     running_loss = 0.0
@@ -98,14 +107,13 @@ def validate_epoch(model, dataloader, criterion, device, num_monte_carlo=10):
     with torch.no_grad():
         for videos, labels, _ in tqdm(dataloader, desc="Validation batches", leave=False):
             output_mc = []
+            videos = videos.to(device)
+            labels = labels.to(device)
             for _ in range(num_monte_carlo):
-                videos = videos.to(device)
-                labels = labels.to(device)
                 outputs = model(videos)
                 loss = criterion(outputs, labels)
                 running_loss += loss.item() * videos.size(0)
-                preds = torch.softmax(outputs, dim=1)
-                output_mc.append(preds)
+                output_mc.append(outputs)
                 total += labels.size(0)
             output_mc = torch.stack(output_mc, dim=0).mean(dim=0)
             _, preds = torch.max(output_mc, 1)
@@ -139,9 +147,9 @@ def main():
     num_monte_carlo = args.num_monte_carlo if args.bayesian_layers is not None else 1
     # Create a ProjectConfiguration object and initialize Accelerator with TensorBoard logging.
     config = ProjectConfiguration(project_dir=".", logging_dir="runs")
-    global accelerator
+    global accelerator, bayesian_training
     accelerator = Accelerator(log_with="tensorboard", project_config=config)
-
+    bayesian_training = args.bayesian_layers is not None
     # Log hyperparameters.
     hparams = {
         "num_epochs": num_epochs,
@@ -203,7 +211,7 @@ def main():
             "prior_sigma": 1.0,
             "posterior_mu_init": 0.0,
             "posterior_rho_init": -3.0,
-            "type": "Reparameterization",  # Flipout or Reparameterization
+            "type": "Flipout",  # Flipout or Reparameterization
             "moped_enable": True,  # True to initialize mu/sigma from the pretrained dnn weights
             "moped_delta": 0.5,
     }
@@ -221,7 +229,7 @@ def main():
     else:
         raise ValueError(f"Invalid model: {args.model}")
     model = model.to(device)
-
+    print(model)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     # Prepare with accelerator.
@@ -229,7 +237,7 @@ def main():
 
     best_val_acc = 0.0
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device)
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, num_monte_carlo)
         val_loss, val_acc = validate_epoch(model, val_loader, criterion, device, num_monte_carlo)
         accelerator.log({"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc}, step=epoch)
         accelerator.print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
