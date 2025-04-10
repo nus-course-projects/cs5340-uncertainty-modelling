@@ -6,6 +6,7 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_video
 import torch.nn as nn
 import torch.optim as optim
+import torch.optim.lr_scheduler as lr_scheduler
 from model.ResNet3D import ResNet3D
 from model.I3D import InceptionI3d
 from bayesian_torch.models.dnn_to_bnn import get_kl_loss
@@ -25,7 +26,7 @@ import argparse
 from datetime import datetime
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
-from utils.dataset import load_msasl
+from utils.dataset import load_msasl, load_asl_citizen
 from utils.optical_flow import OpticalFlowTransform
 
 class RandomHorizontalFlip(nn.Module):
@@ -75,7 +76,7 @@ def train_epoch(model, dataloader, criterion, optimizer, device, num_monte_carlo
         for _ in range(num_monte_carlo):
             outputs = model(videos)
             output_mc.append(outputs)
-            kl_loss = get_kl_loss(model) if bayesian_training else 0.0
+            kl_loss = get_kl_loss(model) if bayesian_training else torch.tensor([0.0], device=device, dtype=torch.float32)
             kl_loss_mc.append(kl_loss)
         outputs = torch.stack(output_mc, dim=0).mean(dim=0)
         kl_loss = torch.stack(kl_loss_mc, dim=0).mean(dim=0)
@@ -114,7 +115,7 @@ def validate_epoch(model, dataloader, criterion, device, num_monte_carlo=10):
                 loss = criterion(outputs, labels)
                 running_loss += loss.item() * videos.size(0)
                 output_mc.append(outputs)
-                total += labels.size(0)
+            total += labels.size(0)
             output_mc = torch.stack(output_mc, dim=0).mean(dim=0)
             _, preds = torch.max(output_mc, 1)
             correct += (preds == labels).sum().item()
@@ -135,6 +136,8 @@ def main():
     parser.add_argument("--input_type", type=str, default="rgb", choices=["rgb", "optical_flow"], help="Input image of the model. Only for I3D model.")
     parser.add_argument("--top_k_labels", type=int, default=100, help="Number of top k labels to use for training")
     parser.add_argument("--num_monte_carlo", type=int, default=10, help="Number of Monte Carlo samples for validation")
+    parser.add_argument("--num_monte_carlo_train", type=int, default=1, help="Number of Monte Carlo samples for training")
+    parser.add_argument("--dataset", type=str, default="msasl", choices=["msasl", "asl_citizen"], help="Dataset to use for training")
     args = parser.parse_args()
 
     # Define experiment variables.
@@ -145,6 +148,7 @@ def main():
     learning_rate = args.learning_rate
     num_classes = args.top_k_labels
     num_monte_carlo = args.num_monte_carlo if args.bayesian_layers is not None else 1
+    num_monte_carlo_train = args.num_monte_carlo_train if args.bayesian_layers is not None else 1
     # Create a ProjectConfiguration object and initialize Accelerator with TensorBoard logging.
     config = ProjectConfiguration(project_dir=".", logging_dir="runs")
     global accelerator, bayesian_training
@@ -162,13 +166,15 @@ def main():
         "input_type": args.input_type,
         "frozen_layers": args.frozen_layers,
         "bayesian_layers": args.bayesian_layers,
-        "num_monte_carlo": num_monte_carlo
+        "num_monte_carlo": num_monte_carlo,
+        "num_monte_carlo_train": num_monte_carlo_train,
+        "dataset": args.dataset
     }
-    accelerator.init_trackers(f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}')
+    accelerator.init_trackers(f'3DCNN_{args.model}_{args.dataset}')
     tb_tracker = accelerator.get_tracker("tensorboard")
 
     # Load datasets.
-    test_dataset, train_dataset, validation_dataset = load_msasl("bin", top_k_labels=num_classes)
+    test_dataset, train_dataset, validation_dataset = load_msasl("bin", top_k_labels=num_classes) if args.dataset == "msasl" else load_asl_citizen("ASL_Citizen", top_k_labels=num_classes)
 
     train_transform = ApplyTransformToKey(
         key="video",
@@ -176,7 +182,7 @@ def main():
             OpticalFlowTransform() if args.input_type  == "optical_flow" else Lambda(lambda x: x),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
             UniformTemporalSubsample(num_frames),
-            Resize(112) if args.model == "resnet" else Resize(224),
+            Resize((112, 112)) if args.model == "resnet" else Resize(224),
             RandomHorizontalFlip(),
             Div255(),
             Normalize(mean=[0.43216, 0.394666, 0.37645], std=[0.22803, 0.22145, 0.216989]) if args.model == "resnet" \
@@ -189,7 +195,7 @@ def main():
             OpticalFlowTransform() if args.input_type  == "optical_flow" else Lambda(lambda x: x),
             Lambda(lambda x: x.permute(1, 0, 2, 3)),  # Convert (T,H,W,C) -> (C,T,H,W)
             UniformTemporalSubsample(num_frames),
-            Resize(112) if args.model == "resnet" else Resize(224),
+            Resize((112, 112)) if args.model == "resnet" else Resize(224),
             Div255(),
             Normalize(mean=[0.43216, 0.394666, 0.37645], std=[0.22803, 0.22145, 0.216989]) if args.model == "resnet" \
                 else Lambda(lambda x: (x-0.5)*2.0),
@@ -211,7 +217,7 @@ def main():
             "prior_sigma": 1.0,
             "posterior_mu_init": 0.0,
             "posterior_rho_init": -3.0,
-            "type": "Flipout",  # Flipout or Reparameterization
+            "type": "Reparameterization",  # Flipout or Reparameterization
             "moped_enable": True,  # True to initialize mu/sigma from the pretrained dnn weights
             "moped_delta": 0.5,
     }
@@ -229,29 +235,31 @@ def main():
     else:
         raise ValueError(f"Invalid model: {args.model}")
     model = model.to(device)
-    print(model)
+    # print(model)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
+    scheduler = lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
     # Prepare with accelerator.
-    model, optimizer, train_loader, val_loader = accelerator.prepare(model, optimizer, train_loader, val_loader)
+    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(model, optimizer, train_loader, val_loader, scheduler)
 
     best_val_acc = 0.0
     for epoch in tqdm(range(num_epochs), desc="Epochs"):
-        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, num_monte_carlo)
+        train_loss, train_acc = train_epoch(model, train_loader, criterion, optimizer, device, num_monte_carlo_train)
         val_loss, val_acc = validate_epoch(model, val_loader, criterion, device, num_monte_carlo)
+        scheduler.step()
         accelerator.log({"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc}, step=epoch)
         accelerator.print(f"Epoch {epoch+1}/{num_epochs}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f} | Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}")
 
         # Save the best model based on validation accuracy.
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            accelerator.save_model(model, f"best_video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}")
+            accelerator.save_model(model, f"best_video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}")
             accelerator.print(f"New best model saved with Val Acc: {best_val_acc:.4f}")
         metrics = {"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc, "best_val_acc": best_val_acc}
-        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}', global_step=epoch)
+        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}', global_step=epoch)
     accelerator.wait_for_everyone()
-    torch.save(model.state_dict(), f"video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}.pth")
-    accelerator.print(f"Training complete. Model saved as video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}.pth")
+    # torch.save(model.state_dict(), f"video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}.pth")
+    # accelerator.print(f"Training complete. Model saved as video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}.pth")
 
 if __name__ == "__main__":
     main()
