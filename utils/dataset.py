@@ -2,7 +2,7 @@ from io import BytesIO
 import json
 import os
 import struct
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, Dict
 import torch
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -10,6 +10,7 @@ import av
 from tqdm import tqdm
 from IPython.display import HTML
 from utils.metadata import MetadataDict
+import csv
 import numpy as np
 
 class KeypointDataset(torch.utils.data.Dataset):
@@ -258,3 +259,160 @@ def load_msasl(data_dir: str, top_k_labels: int = None) -> Tuple[StreamingVideoD
         (f" with top {top_k_labels} labels" if top_k_labels else ""))
 
   return test_dataset, train_dataset, validation_dataset
+
+
+class ASLCitizenDataset(torch.utils.data.Dataset):
+    """
+    Dataset class for loading ASL Citizen data from a CSV file.
+    
+    Expected CSV columns:
+      - Participant ID: Identifier for the participant
+      - Video file: Name (or relative path) of the video file (e.g., 'video1.mp4')
+      - Gloss: The ASL sign gloss, used as the video label
+      - ASL-LEX Code: Additional metadata (e.g., ASL-LEX identifier)
+      
+    Any additional columns in the CSV will be stored in the metadata.
+    
+    Args:
+        csv_path (str): Path to the CSV file.
+        videos_folder (str): Path to the folder containing the video files.
+        label_map (dict, optional): A mapping from the original gloss (label) to integer indices.
+                                    If provided, rows with Gloss not in the mapping will be skipped.
+    """
+    def __init__(self, csv_path: str, videos_folder: str, label_map: Dict[str, int] = None):
+        self.videos_folder = videos_folder
+        # Read CSV entries into a list of dictionaries
+        with open(csv_path, 'r', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            self.entries = [row for row in reader]
+            
+        # If a label mapping is provided, filter and remap entries to only include valid gloss labels
+        if label_map is not None:
+            filtered_entries = []
+            for entry in self.entries:
+                if entry['Gloss'] in label_map:
+                    entry['mapped_label'] = label_map[entry['Gloss']]
+                    filtered_entries.append(entry)
+            self.entries = filtered_entries
+        
+        # If no label_map is provided, create one automatically from unique gloss labels
+        if label_map is None:
+            unique_labels = sorted({entry['Gloss'] for entry in self.entries})
+            self.label_map = {label: i for i, label in enumerate(unique_labels)}
+        else:
+            self.label_map = label_map
+
+    def __len__(self) -> int:
+        return len(self.entries)
+
+    def decode_video(self, video_path: str) -> torch.Tensor:
+        """
+        Decodes a video from the given file path using PyAV.
+        
+        Returns:
+            torch.Tensor: A tensor of shape (Frames, Channels, Height, Width)
+        """
+        container = av.open(video_path)
+        frames = []
+        for frame in container.decode(video=0):
+            frame_rgb = frame.to_rgb().to_ndarray()  # (H, W, 3)
+            # Convert to tensor and permute to (C, H, W)
+            frame_tensor = torch.tensor(frame_rgb, dtype=torch.uint8).permute(2, 0, 1)
+            frames.append(frame_tensor)
+        return torch.stack(frames)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, int, dict]:
+        """
+        Returns:
+            tuple: (video, label, metadata)
+              - video: Tensor of shape (Frames, Channels, Height, Width)
+              - label: The integer label corresponding to the Gloss
+              - metadata: Dictionary with extra metadata (e.g., Participant ID, Video file, Gloss, ASL-LEX Code, etc.)
+        """
+        entry = self.entries[idx]
+        video_file = entry['Video file']
+        video_filepath = os.path.join(self.videos_folder, video_file)
+        video = self.decode_video(video_filepath)
+        # Use the mapped label if available; otherwise, compute from label_map
+        label = entry.get('mapped_label', self.label_map.get(entry['Gloss'], -1))
+        return video, label, entry
+
+    def show_video(self, idx: int) -> HTML:
+        """
+        Displays the video at the given index as an animation in Jupyter.
+        
+        Args:
+            idx (int): Index of the video to display.
+        
+        Returns:
+            IPython.display.HTML: HTML animation of the video.
+        """
+        video, _, _ = self[idx]
+        # Convert video tensor to NumPy array with shape (Frames, Height, Width, Channels)
+        video_numpy = video.permute(0, 2, 3, 1).numpy()
+        fig, ax = plt.subplots(figsize=(video_numpy.shape[2] / 100, video_numpy.shape[1] / 100))
+        ax.set_frame_on(False)
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.axis('off')
+        frame_display = ax.imshow(video_numpy[0])
+        ax.axis('off')
+
+        def update(frame_idx):
+            frame_display.set_data(video_numpy[frame_idx])
+            return frame_display,
+
+        anim = animation.FuncAnimation(fig, update, frames=len(video_numpy), interval=50, blit=True)
+        plt.close(fig)
+        return HTML(anim.to_jshtml())
+
+def load_asl_citizen(data_dir: str, top_k_labels: int = None) -> Tuple[ASLCitizenDataset, ASLCitizenDataset, ASLCitizenDataset]:
+    """
+    Loads the ASL Citizen dataset for train, test, and validation splits from CSV files.
+    
+    Assumes the following CSV files are located in data_dir:
+      - train.csv
+      - test.csv
+      - val.csv
+      
+    Optionally, the dataset can be limited to only the top_k most frequent gloss labels (from train.csv).
+    
+    Args:
+        data_dir (str): Directory containing the CSV files and video files.
+        top_k_labels (int, optional): If provided, only include the top_k most frequent gloss labels.
+        
+    Returns:
+        tuple: (test_dataset, train_dataset, val_dataset)
+    """
+    train_csv = os.path.join(data_dir, "splits/train.csv")
+    test_csv = os.path.join(data_dir, "splits/test.csv")
+    val_csv = os.path.join(data_dir, "splits/val.csv")
+    videos_dir = os.path.join(data_dir, "videos")
+    # Read training CSV entries to determine the label mapping based on Gloss
+    with open(train_csv, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        train_entries = [row for row in reader]
+    
+    label_map = None
+    if top_k_labels is not None:
+        label_counts = {}
+        for entry in train_entries:
+            gloss = entry['Gloss']
+            label_counts[gloss] = label_counts.get(gloss, 0) + 1
+        # Determine the top k labels by frequency
+        top_labels = sorted(label_counts, key=lambda x: label_counts[x], reverse=True)[:top_k_labels]
+        label_map = {label: i for i, label in enumerate(top_labels)}
+    
+    # Create dataset objects using the same label mapping across splits
+    train_dataset = ASLCitizenDataset(train_csv, videos_folder=videos_dir, label_map=label_map)
+    test_dataset = ASLCitizenDataset(test_csv, videos_folder=videos_dir, label_map=label_map)
+    val_dataset = ASLCitizenDataset(val_csv, videos_folder=videos_dir, label_map=label_map)
+    
+    print(f"[TRAIN] Loaded {len(train_dataset)} videos" +
+          (f" with top {top_k_labels} labels" if top_k_labels else ""))
+    print(f"[TEST] Loaded {len(test_dataset)} videos" +
+          (f" with top {top_k_labels} labels" if top_k_labels else ""))
+    print(f"[VALIDATION] Loaded {len(val_dataset)} videos" +
+          (f" with top {top_k_labels} labels" if top_k_labels else ""))
+    
+    return test_dataset, train_dataset, val_dataset
