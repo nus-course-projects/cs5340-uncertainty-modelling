@@ -164,8 +164,8 @@ def main():
         "num_workers": num_workers,
         "model_class": args.model,
         "input_type": args.input_type,
-        "frozen_layers": args.frozen_layers,
-        "bayesian_layers": args.bayesian_layers,
+        "frozen_layers": args.frozen_layers if args.frozen_layers is not None else "NaN",
+        "bayesian_layers": args.bayesian_layers if args.bayesian_layers is not None else "NaN",
         "num_monte_carlo": num_monte_carlo,
         "num_monte_carlo_train": num_monte_carlo_train,
         "dataset": args.dataset
