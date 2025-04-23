@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
+from bayesian_torch.models.dnn_to_bnn import dnn_to_bnn
 
 import numpy as np
 
@@ -194,7 +195,9 @@ class InceptionI3d(nn.Module):
         'Predictions',
     )
 
-    def __init__(self, num_classes=400, frozen_layers=None, spatial_squeeze=True,
+    def __init__(self, num_classes=400, frozen_layers=None, 
+                 bayesian_layers=None, bayesian_options=None,
+                 spatial_squeeze=True,
                  final_endpoint='Logits', name='inception_i3d', in_channels=3, input_type='rgb'):
         """Initializes I3D model instance.
         Args:
@@ -340,10 +343,16 @@ class InceptionI3d(nn.Module):
             pretrained_dict = torch.load(checkpoint_path)
             self.load_state_dict(pretrained_dict)
             print(f"Loaded pre-trained I3D weights from {checkpoint_path}")
+            print(f"Number of layers: {len(self.end_points)}")
             for i, end_point in enumerate(self.end_points):
-                if i < frozen_layers:
+                if i <= frozen_layers:
                     for param in self.end_points[end_point].parameters():
                         param.requires_grad = False
+        print(f"Number of bayesian layers: {bayesian_layers}")
+        if bayesian_layers is not None:
+            for i, end_point in enumerate(self.end_points):
+                if i >= bayesian_layers:
+                    dnn_to_bnn(self.end_points[end_point], bayesian_options)
         self.replace_logits(num_classes)
 
 

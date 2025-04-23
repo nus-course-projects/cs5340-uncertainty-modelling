@@ -237,7 +237,7 @@ def main():
     elif args.model == "i3d":
         assert args.bayesian_layers is not None, "Bayesian layers not supported for I3D model yet!"
         if args.input_type == "rgb":
-            model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers)
+            model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers, bayesian_layers=args.bayesian_layers, bayesian_options=const_bnn_prior_parameters)
         elif args.input_type == "optical_flow":
             model = InceptionI3d(num_classes=num_classes, frozen_layers=args.frozen_layers, in_channels=2, input_type="optical_flow")
         else:
@@ -245,7 +245,7 @@ def main():
     else:
         raise ValueError(f"Invalid model: {args.model}")
     model = model.to(device)
-    # print(model)
+    print(model)
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.AdamW(model.parameters(), lr=learning_rate)
     scheduler = lr_scheduler.StepLR(optimizer, step_size=20, gamma=0.1)
