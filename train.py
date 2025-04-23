@@ -2,6 +2,10 @@ import os
 import json
 import random
 import torch
+import numpy as np
+torch.manual_seed(42)
+np.random.seed(42)
+random.seed(42)
 from torch.utils.data import Dataset, DataLoader
 from torchvision.io import read_video
 import torch.nn as nn
@@ -138,6 +142,8 @@ def main():
     parser.add_argument("--num_monte_carlo", type=int, default=10, help="Number of Monte Carlo samples for validation")
     parser.add_argument("--num_monte_carlo_train", type=int, default=1, help="Number of Monte Carlo samples for training")
     parser.add_argument("--dataset", type=str, default="msasl", choices=["msasl", "asl_citizen"], help="Dataset to use for training")
+    parser.add_argument("--moped_delta", type=float, default=0.05, help="MOPED delta value for Bayesian neural network initialization")
+    parser.add_argument("--bnn_type", type=str, default="Reparameterization", choices=["Reparameterization", "Flipout"], help="Type of Bayesian neural network to use")
     args = parser.parse_args()
 
     # Define experiment variables.
@@ -168,7 +174,9 @@ def main():
         "bayesian_layers": args.bayesian_layers if args.bayesian_layers is not None else "NaN",
         "num_monte_carlo": num_monte_carlo,
         "num_monte_carlo_train": num_monte_carlo_train,
-        "dataset": args.dataset
+        "dataset": args.dataset,
+        "moped_delta": args.moped_delta if args.bayesian_layers is not None else "NaN",
+        "bnn_type": args.bnn_type if args.bayesian_layers is not None else "NaN"
     }
     accelerator.init_trackers(f'3DCNN_{args.model}_{args.dataset}')
     tb_tracker = accelerator.get_tracker("tensorboard")
@@ -217,10 +225,12 @@ def main():
             "prior_sigma": 1.0,
             "posterior_mu_init": 0.0,
             "posterior_rho_init": -3.0,
-            "type": "Reparameterization",  # Flipout or Reparameterization
+            "type": args.bnn_type,  # Flipout or Reparameterization
             "moped_enable": True,  # True to initialize mu/sigma from the pretrained dnn weights
-            "moped_delta": 0.5,
+            "moped_delta": args.moped_delta,
     }
+    model_name = f"{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}_{args.bnn_type}_{args.moped_delta}" \
+        if args.bayesian_layers is not None else f"{args.model}_{args.frozen_layers}_{args.dataset}"
     if args.model == "resnet":
         model = ResNet3D(num_classes=num_classes, frozen_layers=args.frozen_layers, 
                          bayesian_layers=args.bayesian_layers, bayesian_options=const_bnn_prior_parameters)
@@ -253,10 +263,10 @@ def main():
         # Save the best model based on validation accuracy.
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            accelerator.save_model(model, f"best_video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}")
+            accelerator.save_model(model, f"best_video_classification_model_{model_name}")
             accelerator.print(f"New best model saved with Val Acc: {best_val_acc:.4f}")
         metrics = {"train_loss": train_loss, "train_acc": train_acc, "val_loss": val_loss, "val_acc": val_acc, "best_val_acc": best_val_acc}
-        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}', global_step=epoch)
+        tb_tracker.writer.add_hparams(hparams, metrics, run_name=f'3DCNN_{model_name}', global_step=epoch)
     accelerator.wait_for_everyone()
     # torch.save(model.state_dict(), f"video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}.pth")
     # accelerator.print(f"Training complete. Model saved as video_classification_model_{args.model}_{args.frozen_layers}_{args.bayesian_layers}_{args.dataset}.pth")
